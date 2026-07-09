@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Reisplanner Scandinavië</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  body { margin: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+/* ============================================================
+   GEDEELDE OPSLAG — CONFIGURATIE
+   ------------------------------------------------------------
+   Zonder Supabase werkt de planner gewoon, maar slaat hij
+   alleen lokaal op (per browser, via localStorage).
+
+   Wil je dat iedereen hetzelfde plan ziet en kan bewerken?
+   1. Maak een gratis project op https://supabase.com
+   2. Voer in de SQL-editor uit:
+
+      create table reisplan (
+        key text primary key,
+        value text,
+        updated_at timestamptz default now()
+      );
+      alter table reisplan enable row level security;
+      create policy "lezen"     on reisplan for select using (true);
+      create policy "toevoegen" on reisplan for insert with check (true);
+      create policy "bijwerken" on reisplan for update using (true);
+
+   3. Vul hieronder je Project-URL en anon key in
+      (Settings → API in Supabase).
+   ============================================================ */
+const SUPABASE_URL = "";      // bijv. "https://abcdefgh.supabase.co"
+const SUPABASE_ANON_KEY = ""; // de "anon public" key
+
+const useSupabase = SUPABASE_URL && SUPABASE_ANON_KEY;
+
+const sbHeaders = {
+  "apikey": SUPABASE_ANON_KEY,
+  "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+  "Content-Type": "application/json",
+};
+
+window.storage = {
+  async get(key, shared) {
+    if (useSupabase && shared) {
+      const r = await fetch(
+        SUPABASE_URL + "/rest/v1/reisplan?select=value&key=eq." + encodeURIComponent(key),
+        { headers: sbHeaders }
+      );
+      if (!r.ok) throw new Error("Supabase get mislukt");
+      const rows = await r.json();
+      if (rows.length && rows[0].value != null) return { key, value: rows[0].value, shared: true };
+      return null;
+    }
+    const v = localStorage.getItem(key);
+    return v == null ? null : { key, value: v, shared: false };
+  },
+  async set(key, value, shared) {
+    if (useSupabase && shared) {
+      const r = await fetch(SUPABASE_URL + "/rest/v1/reisplan", {
+        method: "POST",
+        headers: { ...sbHeaders, "Prefer": "resolution=merge-duplicates" },
+        body: JSON.stringify({ key, value, updated_at: new Date().toISOString() }),
+      });
+      return r.ok ? { key, value, shared: true } : null;
+    }
+    localStorage.setItem(key, value);
+    return { key, value, shared: false };
+  },
+};
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect } = React;
+
+// ---------- helpers ----------
+const DAY = 24 * 60 * 60 * 1000;
+const fmt = (d) =>
+  d.toLocaleDateString("nl-NL", { weekday: "short", day: "numeric", month: "short" });
+const fmtLong = (d) =>
+  d.toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "long" });
+const parseDate = (s) => {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+};
+
+let idCounter = 100;
+const nid = () => ++idCounter;
+
+const STORAGE_KEY = "reisplan-scandinavie";
+
+// ---------- presets ----------
+const PRESETS = {
+  denemarken: {
+    label: "Bruggen (via Kopenhagen)",
+    stops: [
+      { id: nid(), name: "Jutland (Ribe)", nights: 1, travelHours: 4, travelType: "rijden", lat: 55.33, lon: 8.77, note: "Vanaf Groningen direct haalbaar", activities: ["Avondwandeling Ribe, oudste stadje van Denemarken"], campings: ["Ribe Camping"] },
+      { id: nid(), name: "Kopenhagen", nights: 2, travelHours: 3, travelType: "rijden", lat: 55.68, lon: 12.57, note: "Grote Belt-brug (tol ± €35, meer als de bus >6 m is)", activities: ["Nyhavn, Tivoli", "Havenbad", "Fietsen door de stad"], campings: ["Charlottenlund Fort (aan zee, dicht bij stad)"] },
+      { id: nid(), name: "Hallandkust, strand (Falkenberg / Varberg)", nights: 4, travelHours: 3, travelType: "rijden", lat: 56.9, lon: 12.5, note: "Sontbrug (± €63 tot 6 m). HIKE 1 onderweg: Kullaberg bij Mölle (kliffenkust, 2-3 u), kleine omweg", activities: ["Stranddagen: Skrea strand (Falkenberg) of Apelviken (Varberg)", "Surfles Apelviken", "Vesting Varberg", "Hike Kullaberg (op de heenrit)"], campings: ["Apelvikens Camping (Varberg, surfstrand, rustiger)", "Skrea Camping (Falkenberg, 3.8★, gehorig in juli)", "First Camp Tylösand (mooiste strand, maar feestpubliek en herrie)"] },
+      { id: nid(), name: "Göteborg", nights: 2, travelHours: 1, travelType: "rijden", lat: 57.63, lon: 11.92, note: "Stad + scherenarchipel", activities: ["Veerboot naar Styrsö of Vrångö (autovrije eilanden)", "Haga en Feskekôrka", "Diner: Koka of SK Mat & Människor (ster, weken vooruit boeken)"], campings: ["Liseberg Camping Askim Strand (aan zee, bus naar centrum, 4.1★, vooraf boeken)"] },
+      { id: nid(), name: "Bohuslän", nights: 3, travelHours: 1.5, travelType: "rijden", lat: 58.68, lon: 11.26, note: "Rotskust, zwemmen vanaf de rotsen", activities: ["HIKE 2: Ramsvikslandet, 'rijk van de rotsen' bij Smögen (2-3 u)", "Zeekajak tussen de scheren", "Oesters of kreeft Grebbestad", "Boottocht Väderöarna"], campings: ["GrebbestadFjorden (4.3★)", "Fjällbacka Camping (4.1★, reserveren verplicht)"] },
+      { id: nid(), name: "Söderåsen NP (Röstånga)", nights: 1, travelHours: 3.5, travelType: "rijden", lat: 56.0, lon: 13.28, note: "HIKE 3 op de vertrekochtend: Skäralid-kloof en Kopparhatten (2 u), dan pas doorrijden", activities: ["Hike Söderåsen: kloof, beukenbos, uitzicht Kopparhatten"], campings: ["First Camp Röstånga (aan de rand van het park, 3.8★)"] },
+      { id: nid(), name: "Zuid-Jutland (bij Kolding)", nights: 1, travelHours: 4, travelType: "rijden", lat: 55.5, lon: 9.5, note: "Sontbrug terug (± €63) en Grote Belt (± €35), Kleine Belt is gratis", activities: [], campings: [] },
+      { id: nid(), name: "Thuis (Groningen)", nights: 0, travelHours: 4, travelType: "rijden", lat: 53.22, lon: 6.57, note: "", activities: [], campings: [] },
+    ],
+  },
+  zweden: {
+    label: "Zweden budget (Jutland-ferry)",
+    stops: [
+      {
+        id: nid(), name: "Midden-Jutland (Vejle / Aarhus)", nights: 1, travelHours: 4.5,
+        travelType: "rijden", lat: 55.7, lon: 9.5,
+        note: "Vanaf Groningen in één dag, vroeg vertrekken",
+        activities: ["Den Gamle By of haven Aarhus (als je doorrijdt naar Aarhus)"],
+        campings: ["Blommehaven Camping (Aarhus, aan de baai)"],
+      },
+      {
+        id: nid(), name: "Dalsland", nights: 2, travelHours: 4.5,
+        travelType: "rit + ferry", lat: 59.04, lon: 12.19,
+        note: "2,5 u naar Frederikshavn, ferry 3,5 u naar Göteborg (vroeg boeken, vanaf ± €35 voor de auto), dan 2 u naar Dalsland",
+        activities: ["Kano of kajak huren (op de camping)", "Zwemmen in het meer", "Aquaduct Håverud", "Wandelen langs Dalslandkanaal"],
+        campings: ["Dalslands Camping & Canoe Central (Bengtsfors, 4.0★, sanitair gedateerd)"],
+      },
+      {
+        id: nid(), name: "Göteborg", nights: 3, travelHours: 2,
+        travelType: "rijden", lat: 57.63, lon: 11.92,
+        note: "Stad + scherenarchipel",
+        activities: ["Veerboot naar Styrsö of Vrångö (autovrije eilanden)", "Haga en Feskekôrka", "Diner: Koka of SK Mat & Människor (ster, weken vooruit boeken)", "Liseberg (attractiepark)"],
+        campings: ["Liseberg Camping Askim Strand (aan zee, bus naar centrum, 4.1★, vooraf boeken)"],
+      },
+      {
+        id: nid(), name: "Bohuslän (Grebbestad / Fjällbacka)", nights: 3, travelHours: 1.5,
+        travelType: "rijden", lat: 58.68, lon: 11.26,
+        note: "Rotskust en scheren",
+        activities: ["Zeekajak tussen de scheren", "Kungsklyftan + uitzicht Vetteberget (Fjällbacka)", "Boottocht Väderöarna", "Oesters of kreeft in Grebbestad"],
+        campings: ["GrebbestadFjorden (loopafstand dorp, 4.3★)", "Fjällbacka Camping (tussen de rotsen, 4.1★, reserveren verplicht)"],
+      },
+      {
+        id: nid(), name: "Zuid-Jutland (bij Kolding)", nights: 1, travelHours: 4,
+        travelType: "rit + ferry", lat: 55.5, lon: 9.5,
+        note: "1,5 u naar Göteborg haven, ferry 3,5 u naar Frederikshavn, dan 2,5 u zuid",
+        activities: [], campings: [],
+      },
+      {
+        id: nid(), name: "Thuis (Groningen)", nights: 0, travelHours: 4,
+        travelType: "rijden", lat: 53.22, lon: 6.57,
+        note: "Zuid-Jutland → Groningen",
+        activities: [], campings: [],
+      },
+    ],
+  },
+};
+
+const HOME = { lat: 53.22, lon: 6.57 };
+const MAX_DRIVE = 4.5;
+
+// ---------- standaard paklijst ----------
+let pid = 1000;
+const P = (cat, name, done = false, by = "") => ({ id: ++pid, cat, name, done, by });
+const DEFAULT_PACK = [
+  P("In de bus (controleren, niet inpakken)", "Tent (zit in de bus)", true, "in de bus"),
+  P("In de bus (controleren, niet inpakken)", "Gasfornuis (zit in de bus)", true, "in de bus"),
+  P("In de bus (controleren, niet inpakken)", "Gasvoorraad checken + reservefles/cartridges (aansluiting verschilt per land!)"),
+  P("In de bus (controleren, niet inpakken)", "Campingstoelen en tafel aanwezig?"),
+  P("In de bus (controleren, niet inpakken)", "Pannen, bestek, borden, mokken compleet?"),
+  P("Slapen (in de bus)", "Dekbed of slaapzakken"),
+  P("Slapen (in de bus)", "Kussens + extra deken (nachten 10-15°C)"),
+  P("Slapen (in de bus)", "Verduistering / raamdoeken"),
+  P("Slapen (in de bus)", "Muggenhor of gaas voor open raam/deur"),
+  P("Slapen (in de bus)", "Oogmasker en oordoppen (lang licht, gehorige campings)"),
+  P("Koken", "Koelbox (12V) of koelelementen"),
+  P("Koken", "Scherp mes + snijplank"),
+  P("Koken", "Afwasmiddel, teil, theedoek, spons"),
+  P("Koken", "Aansteker + lucifers"),
+  P("Koken", "Thermoskan"),
+  P("Koken", "Jerrycan of watertank vullen"),
+  P("Koken", "Basisvoorraad: koffie, thee, olie, zout, pasta"),
+  P("Koken", "Vuilniszakken + ziplocks"),
+  P("Kleding", "Regenjas (ook in juli)"),
+  P("Kleding", "Warme trui / fleece"),
+  P("Kleding", "Zwemkleding + sneldrogende handdoek"),
+  P("Kleding", "Wandelschoenen (3 hikes!)"),
+  P("Kleding", "Slippers"),
+  P("Kleding", "Pet + zonnebril"),
+  P("Kleding", "Nette outfit (als het sterrenrestaurant doorgaat)"),
+  P("Strand & hikes", "Strandlaken + windscherm of parasol"),
+  P("Strand & hikes", "Waterschoenen (rotsen Bohuslän)"),
+  P("Strand & hikes", "Dagrugzak + bidons"),
+  P("Strand & hikes", "Drybag (kajak)"),
+  P("Strand & hikes", "Blarenpleisters"),
+  P("Gezondheid", "Toilettas"),
+  P("Gezondheid", "Zonnebrand + aftersun"),
+  P("Gezondheid", "Muggenspray (Zweden, bij water)"),
+  P("Gezondheid", "EHBO-set + persoonlijke medicijnen"),
+  P("Gezondheid", "Wc-papier + handgel"),
+  P("Auto & documenten", "Rijbewijs, ID's, kentekenbewijs, groene kaart"),
+  P("Auto & documenten", "Buslengte opmeten: >6 m = hoger brugtarief!"),
+  P("Auto & documenten", "ØresundGO afsluiten (60% korting Sontbrug)"),
+  P("Auto & documenten", "Campings reserveren (Fjällbacka/Grebbestad, strand, Askim)"),
+  P("Auto & documenten", "Pechhulp met Europa-dekking checken"),
+  P("Auto & documenten", "Gevarendriehoek + hesjes voor iedereen"),
+  P("Auto & documenten", "Offline kaarten downloaden"),
+  P("Elektronica", "Opladers + powerbank"),
+  P("Elektronica", "12V-lader / omvormer"),
+  P("Elektronica", "Boek, kaartspel"),
+];
+
+// ---------- kaart ----------
+const LAND = [
+  [[3.4,51.3],[4.0,51.9],[4.4,52.2],[4.7,52.8],[5.2,53.1],[6.2,53.4],[7.0,53.5],[8.0,53.6],[8.5,53.9],[8.6,54.3],[8.3,54.9],[8.1,55.6],[8.1,56.6],[8.4,57.1],[9.4,57.6],[10.5,57.75],[10.6,57.5],[10.2,56.8],[10.3,56.2],[9.9,55.7],[9.6,55.4],[9.9,54.9],[10.2,54.5],[11.0,54.4],[11.2,54.0],[12.2,54.2],[13.2,54.3],[14.5,53.9],[14.5,50.8],[3.4,50.8]],
+  [[11.1,55.7],[11.5,55.95],[12.1,56.0],[12.6,55.7],[12.4,55.35],[11.8,55.2],[11.2,55.35]],
+  [[9.8,55.3],[10.3,55.6],[10.8,55.55],[10.7,55.2],[10.1,55.05]],
+  [[11.15,59.1],[11.4,58.4],[11.7,57.9],[11.9,57.5],[12.1,57.2],[12.35,56.9],[12.75,56.6],[12.5,56.3],[12.9,55.9],[12.95,55.55],[13.6,55.35],[14.4,55.4],[15.0,55.9],[15.0,61.0],[10.0,61.0],[10.5,59.5],[10.6,59.0]],
+];
+
+function RouteMap({ stops }) {
+  const pts = [HOME, ...stops.filter((s) => isFinite(s.lat) && isFinite(s.lon) && s.lat && s.lon)];
+  if (pts.length < 2) return null;
+  const lats = pts.map((p) => p.lat), lons = pts.map((p) => p.lon);
+  const minLat = Math.min(...lats) - 0.4, maxLat = Math.max(...lats) + 0.4;
+  const minLon = Math.min(...lons) - 0.6, maxLon = Math.max(...lons) + 0.6;
+  const midLat = (minLat + maxLat) / 2;
+  const cos = Math.cos((midLat * Math.PI) / 180);
+  const W = 320, H = 360, PAD = 14;
+  const spanX = Math.max(0.5, (maxLon - minLon) * cos);
+  const spanY = Math.max(0.5, maxLat - minLat);
+  const scale = Math.min((W - 2 * PAD) / spanX, (H - 2 * PAD) / spanY);
+  const px = (lon) => PAD + (lon - minLon) * cos * scale + (W - 2 * PAD - spanX * scale) / 2;
+  const py = (lat) => PAD + (maxLat - lat) * scale + (H - 2 * PAD - spanY * scale) / 2;
+  const routePath = pts.map((p, i) => `${i === 0 ? "M" : "L"}${px(p.lon).toFixed(1)},${py(p.lat).toFixed(1)}`).join(" ");
+  const landPaths = LAND.map(
+    (poly) => poly.map(([lo, la], i) => `${i === 0 ? "M" : "L"}${px(lo).toFixed(1)},${py(la).toFixed(1)}`).join(" ") + " Z"
+  );
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", maxWidth: 360, display: "block", margin: "0 auto", background: "#C9DCE6", borderRadius: 10, border: "1px solid #D6D0C2" }} role="img" aria-label="Routekaart met kustlijnen">
+      {landPaths.map((d, i) => (
+        <path key={i} d={d} fill="#E3E8D9" stroke="#B9C4AE" strokeWidth="0.8" />
+      ))}
+      <path d={routePath} fill="none" stroke="#9A3B26" strokeWidth="2.5" strokeLinejoin="round" opacity="0.9" />
+      {pts.map((p, i) => (
+        <g key={i}>
+          <circle cx={px(p.lon)} cy={py(p.lat)} r={i === 0 ? 5 : 4.5} fill={i === 0 ? "#22303A" : "#9A3B26"} stroke="#F4F2EC" strokeWidth="1.5" />
+          <text x={px(p.lon) + 8} y={py(p.lat) + 4} fontSize="9.5" fill="#22303A" fontFamily="sans-serif" style={{ paintOrder: "stroke", stroke: "#F4F2EC", strokeWidth: 2.5 }}>
+            {i === 0 ? "Thuis" : (p.name || "").split("(")[0].slice(0, 22)}
+          </text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+function Reisplanner() {
+  const [startDate, setStartDate] = useState("2026-07-15");
+  const [deadline, setDeadline] = useState("2026-08-01");
+  const [preset, setPreset] = useState("denemarken");
+  const [stops, setStops] = useState(PRESETS.denemarken.stops);
+  const [packItems, setPackItems] = useState(DEFAULT_PACK);
+  const [view, setView] = useState("route");
+  const [showMap, setShowMap] = useState(true);
+  const [syncStatus, setSyncStatus] = useState("");
+  const [savedInfo, setSavedInfo] = useState(null);
+  const [editorName, setEditorName] = useState("");
+  const [dirty, setDirty] = useState(false);
+
+  // ---------- gedeelde opslag ----------
+  const applyPlan = (plan) => {
+    if (plan.startDate) setStartDate(plan.startDate);
+    if (plan.deadline) setDeadline(plan.deadline);
+    if (plan.preset) setPreset(plan.preset);
+    if (Array.isArray(plan.stops)) {
+      setStops(plan.stops.map((s) => ({ ...s, id: nid(), activities: s.activities || [], campings: s.campings || [] })));
+    }
+    if (Array.isArray(plan.packItems)) {
+      setPackItems(plan.packItems.map((p) => ({ ...p, id: ++pid })));
+    }
+    setSavedInfo({ savedAt: plan.savedAt, savedBy: plan.savedBy });
+  };
+
+  const loadShared = async (silent = false) => {
+    try {
+      const result = await window.storage.get(STORAGE_KEY, true);
+      if (result && result.value) {
+        applyPlan(JSON.parse(result.value));
+        setDirty(false);
+        if (!silent) setSyncStatus("Laatste versie geladen.");
+      } else if (!silent) {
+        setSyncStatus("Nog geen gedeeld plan gevonden.");
+      }
+    } catch (e) {
+      if (!silent) setSyncStatus("Nog geen gedeeld plan gevonden.");
+    }
+  };
+
+  const saveShared = async () => {
+    const payload = {
+      startDate, deadline, preset,
+      stops: stops.map(({ id, ...rest }) => rest),
+      packItems: packItems.map(({ id, ...rest }) => rest),
+      savedAt: new Date().toISOString(),
+      savedBy: editorName.trim() || "onbekend",
+    };
+    try {
+      setSyncStatus("Opslaan…");
+      const result = await window.storage.set(STORAGE_KEY, JSON.stringify(payload), true);
+      if (result) {
+        setSavedInfo({ savedAt: payload.savedAt, savedBy: payload.savedBy });
+        setDirty(false);
+        setSyncStatus(result.shared ? "Opgeslagen. De ander kan het nu laden." : "Lokaal opgeslagen (alleen op dit apparaat).");
+      } else {
+        setSyncStatus("Opslaan mislukt. Probeer opnieuw.");
+      }
+    } catch (e) {
+      setSyncStatus("Opslaan mislukt. Probeer opnieuw.");
+    }
+  };
+
+  useEffect(() => { loadShared(true); }, []);
+
+  const markDirty = () => setDirty(true);
+
+  const loadPreset = (key) => {
+    setPreset(key);
+    setStops(PRESETS[key].stops.map((s) => ({ ...s, id: nid(), activities: [...s.activities], campings: [...s.campings] })));
+    markDirty();
+  };
+
+  const update = (id, field, value) => {
+    setStops((prev) => prev.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
+    markDirty();
+  };
+
+  const move = (idx, dir) => {
+    setStops((prev) => {
+      const next = [...prev];
+      const j = idx + dir;
+      if (j < 0 || j >= next.length) return prev;
+      [next[idx], next[j]] = [next[j], next[idx]];
+      return next;
+    });
+    markDirty();
+  };
+
+  const remove = (id) => { setStops((prev) => prev.filter((s) => s.id !== id)); markDirty(); };
+
+  const addStop = (idx) => {
+    setStops((prev) => {
+      const next = [...prev];
+      next.splice(idx + 1, 0, { id: nid(), name: "Nieuwe stop", nights: 1, travelHours: 2, travelType: "rijden", lat: "", lon: "", note: "", activities: [], campings: [] });
+      return next;
+    });
+    markDirty();
+  };
+
+  // ---------- paklijst acties ----------
+  const togglePack = (id) => {
+    setPackItems((prev) =>
+      prev.map((p) =>
+        p.id === id
+          ? p.done
+            ? { ...p, done: false, by: "" }
+            : { ...p, done: true, by: editorName.trim() || "?" }
+          : p
+      )
+    );
+    markDirty();
+  };
+  const removePack = (id) => { setPackItems((prev) => prev.filter((p) => p.id !== id)); markDirty(); };
+  const addPack = (cat, name) => {
+    if (!name.trim()) return;
+    setPackItems((prev) => [...prev, P(cat, name.trim())]);
+    markDirty();
+  };
+
+  const timeline = useMemo(() => {
+    let cursor = parseDate(startDate);
+    return stops.map((s) => {
+      const arrival = new Date(cursor);
+      const departure = new Date(arrival.getTime() + Math.max(0, s.nights) * DAY);
+      cursor = departure;
+      return { ...s, arrival, departure };
+    });
+  }, [stops, startDate]);
+
+  const endDate = timeline.length ? timeline[timeline.length - 1].arrival : parseDate(startDate);
+  const deadlineDate = parseDate(deadline);
+  const marginDays = Math.round((deadlineDate - endDate) / DAY);
+  const totalNights = stops.reduce((a, s) => a + Math.max(0, s.nights), 0);
+  const driveDays = stops.filter((s) => s.travelHours > 0).length;
+  const longDrives = stops.filter((s) => s.travelType === "rijden" && s.travelHours > MAX_DRIVE);
+  const packDone = packItems.filter((p) => p.done).length;
+
+  const packCats = useMemo(() => {
+    const cats = [];
+    for (const p of packItems) if (!cats.includes(p.cat)) cats.push(p.cat);
+    return cats;
+  }, [packItems]);
+
+  const openGoogleMaps = () => {
+    const coords = [HOME, ...stops.filter((s) => isFinite(s.lat) && isFinite(s.lon) && s.lat && s.lon)]
+      .map((p) => `${p.lat},${p.lon}`);
+    if (coords.length < 2) return;
+    window.open("https://www.google.com/maps/dir/" + coords.join("/"), "_blank");
+  };
+
+  const shareWhatsApp = () => {
+    const lines = [
+      `Roadtrip Scandinavië`,
+      `Vertrek: ${fmtLong(parseDate(startDate))}`,
+      `Thuis: ${fmtLong(endDate)} (${totalNights} nachten)`,
+      ``,
+      ...timeline.map((s) =>
+        s.nights > 0
+          ? `• ${s.name}: ${fmt(s.arrival)} tot ${fmt(s.departure)} (${s.nights}n)` +
+            (s.campings.length ? `\n   Camping: ${s.campings[0].split("(")[0].trim()}` : "")
+          : `• ${s.name}: ${fmt(s.arrival)}`
+      ),
+      ``,
+      `Paklijst: ${packDone}/${packItems.length} geregeld`,
+    ];
+    window.open("https://wa.me/?text=" + encodeURIComponent(lines.join("\n")), "_blank");
+  };
+
+  const tabBtn = (key, label) => (
+    <button
+      onClick={() => setView(key)}
+      style={{
+        padding: "8px 16px", cursor: "pointer", fontSize: 13, fontWeight: 600,
+        border: "none", borderBottom: view === key ? "3px solid #9A3B26" : "3px solid transparent",
+        background: "none", color: view === key ? "#22303A" : "#8A8375",
+      }}>
+      {label}
+    </button>
+  );
+
+  return (
+    <div style={{ background: "#F4F2EC", minHeight: "100vh", color: "#22303A", fontFamily: "'Avenir Next', 'Segoe UI', system-ui, sans-serif" }}>
+      <style>{`
+        input, select { font: inherit; }
+        input:focus, select:focus, button:focus-visible { outline: 2px solid #9A3B26; outline-offset: 1px; }
+        .stopname { background: transparent; border: none; border-bottom: 1px dashed #B9B2A3; width: 100%; font-weight: 600; font-size: 15px; color: #22303A; padding: 2px 0; }
+        .notefield { background: transparent; border: none; border-bottom: 1px dotted #D6D0C2; width: 100%; font-size: 12.5px; color: #5C6A72; padding: 2px 0; }
+        .coordfield { width: 64px; border: 1px solid #E2DCCE; border-radius: 5px; padding: 2px 5px; font-size: 11px; background: #FBFAF6; color: #5C6A72; }
+        .nbtn { width: 26px; height: 26px; border-radius: 6px; border: 1px solid #C6BFAF; background: #FBFAF6; cursor: pointer; font-size: 15px; line-height: 1; color: #22303A; }
+        .nbtn:hover { background: #EFEBE0; }
+        .ghost { border: none; background: none; cursor: pointer; color: #8A8375; font-size: 12px; padding: 2px 6px; }
+        .ghost:hover { color: #9A3B26; }
+        .addline { border: none; background: none; cursor: pointer; color: #9A3B26; font-size: 12px; padding: 0; }
+        .li { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: #3C4A52; padding: 1px 0; }
+        .lix { border: none; background: none; color: #B9B2A3; cursor: pointer; font-size: 11px; padding: 0; }
+        .lix:hover { color: #9A3B26; }
+        .liadd { background: transparent; border: none; border-bottom: 1px dotted #C6BFAF; font-size: 12px; color: #22303A; width: 100%; padding: 2px 0; }
+        .syncbtn { padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; border: 1px solid #45606F; background: #2E404C; color: #F4F2EC; }
+        .syncbtn.primary { background: #9A3B26; border-color: #C96A4A; }
+        .packrow { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid #EFEAE0; }
+        .packrow:hover { background: #F7F4EC; }
+        .packcheck { width: 20px; height: 20px; min-width: 20px; border-radius: 5px; border: 2px solid #C6BFAF; background: #FBFAF6; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #FBFAF6; }
+        .packcheck.done { background: #3E6B4F; border-color: #3E6B4F; }
+        @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+      `}</style>
+
+      {/* header */}
+      <div style={{ background: "#22303A", color: "#F4F2EC", padding: "22px 20px 18px" }}>
+        <div style={{ maxWidth: 680, margin: "0 auto" }}>
+          <div style={{ fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase", color: "#8FA6B3" }}>Roadtripmodel · Scandinavië</div>
+          <h1 style={{ margin: "4px 0 14px", fontSize: 24, fontWeight: 700, letterSpacing: "-0.01em" }}>Reisplanner</h1>
+          <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <label style={{ fontSize: 12 }}>
+              <div style={{ color: "#8FA6B3", marginBottom: 3 }}>Vertrek</div>
+              <input type="date" value={startDate} onChange={(e) => { setStartDate(e.target.value); markDirty(); }}
+                style={{ background: "#2E404C", color: "#F4F2EC", border: "1px solid #45606F", borderRadius: 6, padding: "5px 8px" }} />
+            </label>
+            <label style={{ fontSize: 12 }}>
+              <div style={{ color: "#8FA6B3", marginBottom: 3 }}>Auto uiterlijk terug</div>
+              <input type="date" value={deadline} onChange={(e) => { setDeadline(e.target.value); markDirty(); }}
+                style={{ background: "#2E404C", color: "#F4F2EC", border: "1px solid #45606F", borderRadius: 6, padding: "5px 8px" }} />
+            </label>
+            <div style={{ fontSize: 12 }}>
+              <div style={{ color: "#8FA6B3", marginBottom: 3 }}>Route-preset</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {Object.entries(PRESETS).map(([key, p]) => (
+                  <button key={key} onClick={() => loadPreset(key)}
+                    style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer", fontSize: 12, border: "1px solid " + (preset === key ? "#C96A4A" : "#45606F"), background: preset === key ? "#9A3B26" : "#2E404C", color: "#F4F2EC" }}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button onClick={shareWhatsApp}
+              style={{ padding: "7px 12px", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600, border: "none", background: "#25D366", color: "#0B3D2E" }}>
+              Deel plan via WhatsApp
+            </button>
+          </div>
+
+          {/* samenwerkbalk */}
+          <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #3A505E", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <input
+              placeholder="Jouw naam (voor vinkjes en 'laatst bewerkt')"
+              value={editorName}
+              onChange={(e) => setEditorName(e.target.value)}
+              style={{ background: "#2E404C", color: "#F4F2EC", border: "1px solid #45606F", borderRadius: 6, padding: "5px 8px", fontSize: 12, width: 240 }}
+            />
+            <button className="syncbtn primary" onClick={saveShared}>Opslaan (gedeeld)</button>
+            <button className="syncbtn" onClick={() => loadShared(false)}>Laatste versie laden</button>
+            <div style={{ fontSize: 11.5, color: "#8FA6B3" }}>
+              {savedInfo && savedInfo.savedAt && (
+                <span>
+                  Laatst opgeslagen {new Date(savedInfo.savedAt).toLocaleString("nl-NL", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                  {savedInfo.savedBy ? ` door ${savedInfo.savedBy}` : ""}
+                  {". "}
+                </span>
+              )}
+              {dirty && <span style={{ color: "#E8B96A" }}>Niet-opgeslagen wijzigingen. </span>}
+              {syncStatus}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* tabs */}
+      <div style={{ maxWidth: 680, margin: "0 auto", padding: "6px 20px 0", borderBottom: "1px solid #E2DCCE", display: "flex", gap: 4 }}>
+        {tabBtn("route", "Route")}
+        {tabBtn("pack", `Paklijst (${packDone}/${packItems.length})`)}
+      </div>
+
+      {view === "route" && (
+        <React.Fragment>
+          <div style={{ maxWidth: 680, margin: "0 auto", padding: "14px 20px 0" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10, background: "#FBFAF6", border: "1px solid #E2DCCE", borderRadius: 10, padding: "12px 14px" }}>
+              <Stat label="Thuiskomst" value={fmt(endDate)} />
+              <Stat label="Nachten" value={totalNights} />
+              <Stat label="Reisdagen" value={driveDays} />
+              <Stat label="Marge tot deadline" value={`${marginDays} dg`} color={marginDays < 0 ? "#9A3B26" : marginDays <= 1 ? "#A87413" : "#3E6B4F"} />
+            </div>
+
+            {marginDays < 0 && <Warn>Je komt {Math.abs(marginDays)} dag(en) ná de autodeadline thuis. Haal nachten weg of vertrek eerder.</Warn>}
+            {longDrives.length > 0 && (
+              <Warn tone="amber">
+                {longDrives.length === 1 ? "1 rit is" : `${longDrives.length} ritten zijn`} langer dan {MAX_DRIVE} u rijden voor één bestuurder: {longDrives.map((s) => s.name).join(", ")}.
+              </Warn>
+            )}
+
+            <div style={{ marginTop: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <button className="ghost" onClick={() => setShowMap(!showMap)} style={{ fontSize: 13, color: "#22303A", paddingLeft: 0 }}>
+                  {showMap ? "▾" : "▸"} Routekaart
+                </button>
+                <button className="ghost" onClick={openGoogleMaps} style={{ fontSize: 13, color: "#9A3B26", fontWeight: 600 }}>
+                  Open route in Google Maps ↗
+                </button>
+              </div>
+              {showMap && (
+                <div style={{ marginTop: 6 }}>
+                  <RouteMap stops={timeline} />
+                  <p style={{ fontSize: 11, color: "#8A8375", textAlign: "center", margin: "6px 0 0" }}>
+                    Vereenvoudigde kustlijnen. Vul lat/lon in bij een stop om die op de kaart te tonen.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div style={{ maxWidth: 680, margin: "0 auto", padding: "18px 20px 40px" }}>
+            {timeline.map((s, i) => (
+              <div key={s.id}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0 6px 8px" }}>
+                  <div style={{ width: 2, alignSelf: "stretch", minHeight: 30, background: s.travelType === "rijden" ? "#9A3B26" : "transparent", borderLeft: s.travelType !== "rijden" ? "2px dashed #3E5C6B" : "none", marginLeft: 9 }} />
+                  <span style={{ fontSize: 12, color: "#5C6A72", whiteSpace: "nowrap" }}>{s.travelType === "rijden" ? "🚐" : "⛴️"}</span>
+                  <input type="number" min="0" step="0.5" value={s.travelHours}
+                    onChange={(e) => update(s.id, "travelHours", parseFloat(e.target.value) || 0)}
+                    style={{ width: 56, border: "1px solid #C6BFAF", borderRadius: 6, padding: "3px 6px", fontSize: 12, background: "#FBFAF6" }} />
+                  <span style={{ fontSize: 12, color: "#5C6A72" }}>uur</span>
+                  <select value={s.travelType} onChange={(e) => update(s.id, "travelType", e.target.value)}
+                    style={{ fontSize: 12, border: "1px solid #C6BFAF", borderRadius: 6, padding: "3px 4px", background: "#FBFAF6", color: "#22303A" }}>
+                    <option value="rijden">rijden</option>
+                    <option value="rit + ferry">rit + ferry</option>
+                  </select>
+                  {s.travelType === "rijden" && s.travelHours > MAX_DRIVE && (
+                    <span style={{ fontSize: 11, color: "#9A3B26", fontWeight: 600 }}>lang!</span>
+                  )}
+                </div>
+
+                <div style={{ background: "#FBFAF6", border: "1px solid #E2DCCE", borderRadius: 10, padding: "12px 14px" }}>
+                  <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <input className="stopname" value={s.name} onChange={(e) => update(s.id, "name", e.target.value)} />
+                      <div style={{ fontSize: 12, color: "#5C6A72", margin: "5px 0 3px" }}>
+                        {s.nights > 0 ? `${fmt(s.arrival)} → ${fmt(s.departure)}` : fmtLong(s.arrival)}
+                      </div>
+                      <input className="notefield" placeholder="notitie…" value={s.note} onChange={(e) => update(s.id, "note", e.target.value)} />
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 5 }}>
+                        <span style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "#B0A997" }}>kaart</span>
+                        <input className="coordfield" type="number" step="0.01" placeholder="lat"
+                          value={s.lat ?? ""} onChange={(e) => update(s.id, "lat", e.target.value === "" ? "" : parseFloat(e.target.value))} />
+                        <input className="coordfield" type="number" step="0.01" placeholder="lon"
+                          value={s.lon ?? ""} onChange={(e) => update(s.id, "lon", e.target.value === "" ? "" : parseFloat(e.target.value))} />
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8A8375", marginBottom: 4 }}>nachten</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <button className="nbtn" onClick={() => update(s.id, "nights", Math.max(0, s.nights - 1))}>−</button>
+                        <span style={{ fontWeight: 700, fontSize: 17, minWidth: 20 }}>{s.nights}</span>
+                        <button className="nbtn" onClick={() => update(s.id, "nights", s.nights + 1)}>+</button>
+                      </div>
+                      <div style={{ marginTop: 6, display: "flex", gap: 2, justifyContent: "center" }}>
+                        <button className="ghost" onClick={() => move(i, -1)} title="omhoog">↑</button>
+                        <button className="ghost" onClick={() => move(i, 1)} title="omlaag">↓</button>
+                        <button className="ghost" onClick={() => remove(s.id)} title="verwijderen">✕</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {(s.activities.length > 0 || s.campings.length > 0 || s.nights > 0) && (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginTop: 10, paddingTop: 10, borderTop: "1px solid #EFEAE0" }}>
+                      <ListEditor title="Doen" items={s.activities} onChange={(items) => update(s.id, "activities", items)} placeholder="+ activiteit, Enter" />
+                      <ListEditor title="Slapen" items={s.campings} onChange={(items) => update(s.id, "campings", items)} placeholder="+ camping of plek, Enter" />
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ padding: "4px 0 0 24px" }}>
+                  <button className="addline" onClick={() => addStop(i)}>+ stop toevoegen</button>
+                </div>
+              </div>
+            ))}
+
+            <p style={{ fontSize: 12, color: "#8A8375", marginTop: 22, lineHeight: 1.5 }}>
+              Samenwerken: eerst "Laatste versie laden", dan bewerken, dan "Opslaan (gedeeld)". Geen live-sync: wie het laatst opslaat, overschrijft de vorige versie.
+              Let op met de bus: langer dan 6 m betekent bijna dubbele brugtol. In de bus overnachten buiten campings is in Denemarken vrijwel nergens toegestaan.
+            </p>
+          </div>
+        </React.Fragment>
+      )}
+
+      {view === "pack" && (
+        <div style={{ maxWidth: 680, margin: "0 auto", padding: "16px 20px 40px" }}>
+          <p style={{ fontSize: 12.5, color: "#5C6A72", margin: "0 0 4px" }}>
+            Vul eerst je naam in bovenaan. Klik op een vakje om af te vinken; je naam komt erbij te staan zodat je ziet wie het meeneemt of geregeld heeft.
+          </p>
+          <p style={{ fontSize: 12, color: "#8A8375", margin: "0 0 14px" }}>
+            Vinkjes gaan mee met "Opslaan (gedeeld)". Nogmaals: geen live-sync, dus na een inpaksessie opslaan.
+          </p>
+
+          {packCats.map((cat) => {
+            const items = packItems.filter((p) => p.cat === cat);
+            const done = items.filter((p) => p.done).length;
+            return (
+              <div key={cat} style={{ background: "#FBFAF6", border: "1px solid #E2DCCE", borderRadius: 10, marginBottom: 14, overflow: "hidden" }}>
+                <div style={{ padding: "9px 12px", background: "#EFEAE0", display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "#3C4A52" }}>{cat}</span>
+                  <span style={{ fontSize: 11.5, color: done === items.length ? "#3E6B4F" : "#8A8375", fontWeight: 600 }}>{done}/{items.length}</span>
+                </div>
+                {items.map((p) => (
+                  <div className="packrow" key={p.id}>
+                    <button className={"packcheck" + (p.done ? " done" : "")} onClick={() => togglePack(p.id)} aria-label={p.done ? "afvinken ongedaan maken" : "afvinken"}>
+                      {p.done ? "✓" : ""}
+                    </button>
+                    <span style={{ flex: 1, fontSize: 13.5, color: p.done ? "#8A8375" : "#22303A", textDecoration: p.done ? "line-through" : "none" }}>
+                      {p.name}
+                    </span>
+                    {p.done && p.by && (
+                      <span style={{ fontSize: 11, fontWeight: 600, color: "#3E6B4F", background: "#E4EDE6", borderRadius: 10, padding: "2px 8px", whiteSpace: "nowrap" }}>
+                        {p.by}
+                      </span>
+                    )}
+                    <button className="lix" onClick={() => removePack(p.id)} title="verwijderen">✕</button>
+                  </div>
+                ))}
+                <PackAdder onAdd={(name) => addPack(cat, name)} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PackAdder({ onAdd }) {
+  const [draft, setDraft] = useState("");
+  const commit = () => { if (draft.trim()) { onAdd(draft); setDraft(""); } };
+  return (
+    <div style={{ padding: "7px 12px" }}>
+      <input
+        className="liadd"
+        placeholder="+ item toevoegen, Enter"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && commit()}
+        onBlur={commit}
+      />
+    </div>
+  );
+}
+
+function ListEditor({ title, items, onChange, placeholder }) {
+  const [draft, setDraft] = useState("");
+  const add = () => {
+    const v = draft.trim();
+    if (!v) return;
+    onChange([...items, v]);
+    setDraft("");
+  };
+  return (
+    <div>
+      <div style={{ fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8A8375", marginBottom: 4 }}>{title}</div>
+      {items.map((it, idx) => (
+        <div className="li" key={idx}>
+          <span style={{ color: "#9A3B26" }}>·</span>
+          <span style={{ flex: 1 }}>{it}</span>
+          <button className="lix" onClick={() => onChange(items.filter((_, j) => j !== idx))}>✕</button>
+        </div>
+      ))}
+      <input
+        className="liadd"
+        placeholder={placeholder}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && add()}
+        onBlur={add}
+      />
+    </div>
+  );
+}
+
+function Stat({ label, value, color = "#22303A" }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8A8375" }}>{label}</div>
+      <div style={{ fontSize: 17, fontWeight: 700, color }}>{value}</div>
+    </div>
+  );
+}
+
+function Warn({ children, tone = "red" }) {
+  const c = tone === "red"
+    ? { bg: "#F6E4DF", border: "#D9A899", text: "#7C2E1D" }
+    : { bg: "#F6EEDC", border: "#D9C48F", text: "#7A5A17" };
+  return (
+    <div style={{ marginTop: 10, background: c.bg, border: `1px solid ${c.border}`, color: c.text, borderRadius: 8, padding: "9px 12px", fontSize: 13 }}>
+      {children}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Reisplanner />);
+</script>
+</body>
+</html>
